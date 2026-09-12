@@ -1,0 +1,430 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Identity & Access ----------
+
+model Company {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+
+  members     CompanyMember[]
+  customers   Customer[]
+  orders      Order[]
+  drivers     Driver[]
+  vehicles    Vehicle[]
+  warehouses  Warehouse[]
+  apiKeys     ApiKey[]
+  webhooks    Webhook[]
+  auditLogs   AuditLog[]
+  notifications Notification[]
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String?
+  name         String
+  createdAt    DateTime @default(now())
+
+  memberships CompanyMember[]
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  name        String   @unique // SUPER_ADMIN, COMPANY_ADMIN, OPERATIONS_MANAGER, DISPATCHER, DRIVER, CUSTOMER
+  permissions RolePermission[]
+  members     CompanyMember[]
+}
+
+model Permission {
+  id   String @id @default(uuid())
+  key  String @unique // e.g. "order:create", "order:assign"
+  roles RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id])
+  permission   Permission @relation(fields: [permissionId], references: [id])
+
+  @@id([roleId, permissionId])
+}
+
+model CompanyMember {
+  id        String  @id @default(uuid())
+  companyId String
+  userId    String
+  roleId    String
+
+  company Company @relation(fields: [companyId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+  role    Role    @relation(fields: [roleId], references: [id])
+
+  @@unique([companyId, userId])
+  @@index([companyId])
+}
+
+// ---------- Customers / Orders / Shipments ----------
+
+model Customer {
+  id        String    @id @default(uuid())
+  companyId String
+  name      String
+  email     String
+  phone     String?
+  deletedAt DateTime?
+
+  company Company @relation(fields: [companyId], references: [id])
+  orders  Order[]
+
+  @@index([companyId])
+}
+
+enum OrderStatus {
+  CREATED
+  CONFIRMED
+  PICKED_UP
+  IN_TRANSIT
+  OUT_FOR_DELIVERY
+  DELIVERED
+  FAILED
+  CANCELLED
+  RETURNED
+}
+
+enum Priority {
+  STANDARD
+  EXPRESS
+  URGENT
+}
+
+enum PaymentStatus {
+  UNPAID
+  PAID
+  REFUNDED
+}
+
+model Order {
+  id                  String        @id @default(uuid())
+  companyId           String
+  customerId          String
+  status              OrderStatus   @default(CREATED)
+  priority            Priority      @default(STANDARD)
+  pickupAddress       Json
+  deliveryAddress     Json
+  packageInfo         Json
+  weightKg            Decimal
+  deliveryFee         Decimal
+  paymentStatus       PaymentStatus @default(UNPAID)
+  assignedDriverId    String?
+  assignedVehicleId   String?
+  estimatedDeliveryAt DateTime?
+  deletedAt           DateTime?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  company  Company   @relation(fields: [companyId], references: [id])
+  customer Customer  @relation(fields: [customerId], references: [id])
+  driver   Driver?   @relation(fields: [assignedDriverId], references: [id])
+  vehicle  Vehicle?  @relation(fields: [assignedVehicleId], references: [id])
+  shipment Shipment?
+  routeStops RouteStop[]
+
+  @@index([companyId, status])
+  @@index([companyId, assignedDriverId])
+}
+
+model Shipment {
+  id             String      @id @default(uuid())
+  orderId        String      @unique
+  companyId      String
+  trackingNumber String      @unique
+  status         OrderStatus
+  createdAt      DateTime    @default(now())
+
+  order      Order       @relation(fields: [orderId], references: [id])
+  packages   Package[]
+  deliveries Delivery[]
+
+  @@index([trackingNumber])
+}
+
+model Package {
+  id         String  @id @default(uuid())
+  shipmentId String
+  weightKg   Decimal
+  lengthCm   Decimal?
+  widthCm    Decimal?
+  heightCm   Decimal?
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id])
+
+  @@index([shipmentId])
+}
+
+enum DeliveryOutcome {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+model Delivery {
+  id            String          @id @default(uuid())
+  shipmentId    String
+  attemptNumber Int
+  status        DeliveryOutcome @default(PENDING)
+  failureReason String?
+  notes         String?
+  driverId      String
+  startedAt     DateTime?
+  completedAt   DateTime?
+
+  shipment Shipment          @relation(fields: [shipmentId], references: [id])
+  driver   Driver            @relation(fields: [driverId], references: [id])
+  proof    ProofOfDelivery?
+
+  @@index([shipmentId])
+  @@index([driverId])
+}
+
+model ProofOfDelivery {
+  id           String   @id @default(uuid())
+  deliveryId   String   @unique
+  signatureUrl String?
+  photoUrl     String?
+  lat          Decimal
+  lng          Decimal
+  capturedAt   DateTime @default(now())
+
+  delivery Delivery @relation(fields: [deliveryId], references: [id])
+}
+
+// ---------- Fleet: Drivers, Vehicles, Routes ----------
+
+enum DriverAvailability {
+  AVAILABLE
+  ON_DELIVERY
+  OFFLINE
+  ON_BREAK
+}
+
+model Driver {
+  id               String             @id @default(uuid())
+  companyId        String
+  userId           String
+  availability     DriverAvailability @default(OFFLINE)
+  currentVehicleId String?
+  deletedAt        DateTime?
+
+  company   Company          @relation(fields: [companyId], references: [id])
+  orders    Order[]
+  deliveries Delivery[]
+  locations DriverLocation[]
+  routes    Route[]
+
+  @@index([companyId, availability])
+}
+
+model DriverLocation {
+  id         String   @id @default(uuid())
+  driverId   String
+  lat        Decimal
+  lng        Decimal
+  speed      Decimal?
+  heading    Decimal?
+  recordedAt DateTime
+
+  driver Driver @relation(fields: [driverId], references: [id])
+
+  @@index([driverId, recordedAt])
+}
+
+enum VehicleStatus {
+  AVAILABLE
+  IN_USE
+  MAINTENANCE
+  OFFLINE
+}
+
+model Vehicle {
+  id                String        @id @default(uuid())
+  companyId         String
+  licensePlate      String        @unique
+  type              String
+  capacityKg        Decimal
+  status            VehicleStatus @default(AVAILABLE)
+  nextMaintenanceAt DateTime?
+  deletedAt         DateTime?
+
+  company Company @relation(fields: [companyId], references: [id])
+  orders  Order[]
+  routes  Route[]
+
+  @@index([companyId, status])
+}
+
+enum RouteStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+model Route {
+  id                   String      @id @default(uuid())
+  companyId            String
+  driverId             String
+  vehicleId            String
+  status               RouteStatus @default(PLANNED)
+  estimatedDistanceKm  Decimal
+  estimatedDurationSec Int
+  createdAt            DateTime    @default(now())
+
+  driver  Driver      @relation(fields: [driverId], references: [id])
+  vehicle Vehicle     @relation(fields: [vehicleId], references: [id])
+  stops   RouteStop[]
+}
+
+model RouteStop {
+  id        String    @id @default(uuid())
+  routeId   String
+  orderId   String
+  sequence  Int
+  arrivedAt DateTime?
+
+  route Route @relation(fields: [routeId], references: [id])
+  order Order @relation(fields: [orderId], references: [id])
+
+  @@unique([routeId, sequence])
+}
+
+// ---------- Warehouses & Inventory ----------
+
+model Warehouse {
+  id        String    @id @default(uuid())
+  companyId String
+  name      String
+  address   Json
+  capacity  Int
+  managerId String?
+  deletedAt DateTime?
+
+  company   Company         @relation(fields: [companyId], references: [id])
+  inventory InventoryItem[]
+}
+
+model InventoryItem {
+  id               String @id @default(uuid())
+  warehouseId      String
+  sku              String
+  name             String
+  quantity         Int
+  reorderThreshold Int
+
+  warehouse Warehouse           @relation(fields: [warehouseId], references: [id])
+  movements InventoryMovement[]
+
+  @@unique([warehouseId, sku])
+}
+
+enum MovementType {
+  IN
+  OUT
+  TRANSFER
+}
+
+model InventoryMovement {
+  id        String       @id @default(uuid())
+  itemId    String
+  type      MovementType
+  quantity  Int
+  createdAt DateTime     @default(now())
+
+  item InventoryItem @relation(fields: [itemId], references: [id])
+}
+
+// ---------- Notifications, Webhooks, Audit ----------
+
+model Notification {
+  id        String    @id @default(uuid())
+  companyId String
+  userId    String
+  type      String
+  payload   Json
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, userId, readAt])
+}
+
+model ApiKey {
+  id         String    @id @default(uuid())
+  companyId  String
+  hashedKey  String    @unique
+  label      String
+  scopes     String[]
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  company Company @relation(fields: [companyId], references: [id])
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+}
+
+model Webhook {
+  id        String   @id @default(uuid())
+  companyId String
+  url       String
+  secret    String
+  events    String[]
+  createdAt DateTime @default(now())
+
+  company Company        @relation(fields: [companyId], references: [id])
+  deliveries WebhookEvent[]
+}
+
+model WebhookEvent {
+  id             String                 @id @default(uuid())
+  webhookId      String
+  eventType      String
+  payload        Json
+  status         WebhookDeliveryStatus  @default(PENDING)
+  attempts       Int                    @default(0)
+  idempotencyKey String                 @unique
+  createdAt      DateTime               @default(now())
+
+  webhook Webhook @relation(fields: [webhookId], references: [id])
+
+  @@index([webhookId, status])
+}
+
+model AuditLog {
+  id           String   @id @default(uuid())
+  companyId    String
+  actorId      String
+  action       String
+  resourceType String
+  resourceId   String
+  metadata     Json
+  createdAt    DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, resourceType, resourceId])
+}
